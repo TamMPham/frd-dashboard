@@ -1,0 +1,7 @@
+node_modules
+.next
+.git
+Dockerfile
+# NEVER bake local env (it can carry the dev auth bypass) into the image.
+.env.local
+.env*.local

@@ -1,0 +1,123 @@
+@import "tailwindcss";
+
+/* ── Morning ledger: ink on warm paper, one deep green ─────────────────── */
+
+:root {
+  --paper: #faf9f5;
+  --surface: #ffffff;
+  --ink: #17150e;
+  --muted: #6f6b5e;
+  --faint: #96917f;
+  --hairline: #e6e3d8;
+  --hairline-strong: #d4d0c2;
+  --green: #0e5e39;
+  --green-deep: #0a4a2d;
+  --green-tint: #ecf3ed;
+  --red: #b42318;
+  --red-tint: #fbeae8;
+  --amber: #9a6700;
+  --amber-tint: #faf3e4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141310;
+    --surface: #1c1b17;
+    --ink: #eceadf;
+    --muted: #a19c8c;
+    --faint: #7c776a;
+    --hairline: #2b2a24;
+    --hairline-strong: #3a382f;
+    --green: #58a980;
+    --green-deep: #6fbd94;
+    --green-tint: #1a2921;
+    --red: #e0766b;
+    --red-tint: #33201d;
+    --amber: #d3a24a;
+    --amber-tint: #2e2617;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-green: var(--green);
+  --color-green-deep: var(--green-deep);
+  --color-green-tint: var(--green-tint);
+  --color-red: var(--red);
+  --color-red-tint: var(--red-tint);
+  --color-amber: var(--amber);
+  --color-amber-tint: var(--amber-tint);
+  --font-display: var(--font-fraunces);
+  --font-sans: var(--font-instrument);
+  --font-mono: var(--font-plex-mono);
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-instrument), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--green);
+  color: #fff;
+}
+
+/* Staggered section entrance — one orchestrated reveal on load. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.rise {
+  animation: rise-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Row check-off: collapse out after a completed action. */
+.row-leaving {
+  opacity: 0;
+  transform: translateX(6px) scale(0.99);
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  overflow: hidden;
+  transition:
+    opacity 0.28s ease,
+    transform 0.28s ease,
+    max-height 0.34s ease 0.08s,
+    padding 0.34s ease 0.08s,
+    margin 0.34s ease 0.08s;
+}
+
+.row-live {
+  max-height: 60rem;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation: none;
+  }
+  .row-leaving {
+    transition: none;
+  }
+}
+
+/* Anchored sections land below the sticky mobile header. */
+section[id] {
+  scroll-margin-top: 4.5rem;
+}
