@@ -46,6 +46,26 @@ export interface DraftItem {
   status_label: string;
 }
 
+// The staged Gmail draft's live content, read for the inline preview/editor.
+// Mirrors frd-backend DraftContent / DraftContentUpdate.
+export interface DraftContent {
+  id: number;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  attachments: string[];
+  editable: boolean;
+  sendable: boolean;
+}
+
+export interface DraftContentUpdate {
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+}
+
 export interface ThreadGroup {
   key: string;
   subject: string;

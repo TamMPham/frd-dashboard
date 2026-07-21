@@ -1,11 +1,23 @@
 "use client";
 
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
-import { AlertTriangle, ExternalLink, ShieldAlert } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronRight,
+  ExternalLink,
+  Loader2,
+  Paperclip,
+  PenLine,
+  ShieldAlert,
+} from "lucide-react";
 import { useState } from "react";
 
+import { api, ApiError } from "@/lib/api";
 import type {
   DecisionItem,
+  DraftContent,
+  DraftContentUpdate,
   DraftItem,
   FyiItem,
   ReminderItem,
@@ -14,6 +26,8 @@ import type {
 } from "@/lib/types";
 
 import { ActionButton, ConfirmButton, OpenLink, useRowAction } from "./actions";
+import { ConfirmDialog } from "./confirm-dialog";
+import { useToast } from "./toast";
 
 function Badge({ children }: { children: React.ReactNode }) {
   return (
@@ -178,9 +192,356 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
 
 /* ── Drafts ────────────────────────────────────────────────────────────── */
 
+/** One "To/Cc/Subject" line in the letter header. */
+function MetaLine({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex gap-2.5">
+      <span className="w-9 shrink-0 pt-px font-mono text-[10px] uppercase tracking-wider text-faint">
+        {label}
+      </span>
+      <span className="min-w-0 break-words text-[13px] leading-relaxed text-ink">
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** A labelled field in the edit form. */
+function EditField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-faint">
+        {label}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+const INPUT_CLASS =
+  "w-full rounded-lg border border-hairline-strong bg-surface px-3 py-2 text-sm text-ink transition-colors placeholder:text-faint focus:border-green focus:outline-none focus:ring-1 focus:ring-green";
+
+function splitAddresses(value: string): string[] {
+  return value
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The staged draft's live Gmail content. Shared between DraftRow (Send
+ * gating + confirmation details) and DraftPreview (the inline panel) —
+ * react-query dedupes on the key, so it's still one background prefetch per
+ * row. Disabled for rows without a physical Gmail draft.
+ */
+function useDraftContent(item: DraftItem) {
+  return useQuery({
+    queryKey: ["draft-content", item.id],
+    queryFn: () => api<DraftContent>(`/api/drafts/${item.id}/content`),
+    staleTime: 5 * 60_000,
+    retry: 1,
+    enabled: item.open_label === "Open draft",
+  });
+}
+
+type SendAction = ReturnType<typeof useRowAction>;
+
+/**
+ * The staged Gmail draft, read live and shown in place so Peter can review —
+ * and edit — it without leaving the dashboard. The content query runs on
+ * mount (a background prefetch), so by the time he expands the panel it's
+ * already cached and opens instantly. Saving writes back to the Gmail draft.
+ * Sending lives on the row (DraftRow's Send button + confirmation dialog);
+ * this panel only adds "Save & send" in edit mode, which saves first so
+ * exactly what's on screen goes out. Sending from Gmail itself still works —
+ * the reconcile sweep picks it up.
+ */
+function DraftPreview({
+  item,
+  send,
+  onEditingChange,
+}: {
+  item: DraftItem;
+  send: SendAction;
+  onEditingChange: (editing: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saveSendOpen, setSaveSendOpen] = useState(false);
+  const [form, setForm] = useState({
+    toText: "",
+    ccText: "",
+    subject: "",
+    body: "",
+  });
+  const toast = useToast();
+  const queryClient = useQueryClient();
+
+  // The row hides its Send button while the form is open so stale saved
+  // content can't be sent under unsaved on-screen edits.
+  function updateEditing(next: boolean) {
+    setEditing(next);
+    onEditingChange(next);
+  }
+
+  const content = useDraftContent(item);
+
+  const save = useMutation({
+    mutationFn: (body: DraftContentUpdate) =>
+      api<DraftContent>(`/api/drafts/${item.id}/content`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["draft-content", item.id], updated);
+      updateEditing(false);
+      toast("Draft saved to Gmail", true);
+    },
+    onError: (e) =>
+      toast(e instanceof ApiError ? e.message : "Couldn't save the draft", false),
+  });
+
+  const c = content.data;
+
+  function formPayload(): DraftContentUpdate {
+    return {
+      to: splitAddresses(form.toText),
+      cc: splitAddresses(form.ccText),
+      subject: form.subject,
+      body: form.body,
+    };
+  }
+
+  function startEdit() {
+    if (!c) return;
+    setForm({
+      toText: c.to.join(", "),
+      ccText: c.cc.join(", "),
+      subject: c.subject,
+      body: c.body,
+    });
+    updateEditing(true);
+  }
+
+  return (
+    <div className="mt-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 text-[13px] font-medium text-green transition-colors hover:text-green-deep"
+      >
+        <ChevronRight
+          className={clsx("size-3.5 transition-transform", open && "rotate-90")}
+        />
+        {open ? "Hide draft" : "Preview draft"}
+        {content.isFetching && (
+          <Loader2 className="size-3 animate-spin text-faint" />
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-2 rounded-xl border border-hairline bg-paper p-4">
+          {content.isLoading ? (
+            <div className="space-y-2.5" aria-label="Loading draft">
+              <div className="h-3 w-2/5 animate-pulse rounded bg-hairline" />
+              <div className="h-3 w-1/4 animate-pulse rounded bg-hairline" />
+              <div className="mt-4 h-3 w-full animate-pulse rounded bg-hairline" />
+              <div className="h-3 w-11/12 animate-pulse rounded bg-hairline" />
+              <div className="h-3 w-3/4 animate-pulse rounded bg-hairline" />
+            </div>
+          ) : content.isError || !c ? (
+            <p className="text-[13px] leading-snug text-muted">
+              Couldn&apos;t load the draft here —{" "}
+              {content.error instanceof ApiError
+                ? content.error.message
+                : "it may have been sent or discarded"}
+              . Use{" "}
+              <span className="font-medium text-ink">Open draft</span> to see it
+              in Gmail.
+            </p>
+          ) : editing ? (
+            <div className="space-y-2.5">
+              <EditField label="To">
+                <input
+                  className={INPUT_CLASS}
+                  value={form.toText}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, toText: e.target.value }))
+                  }
+                  placeholder="name@example.com, …"
+                  aria-label="To recipients"
+                />
+              </EditField>
+              <EditField label="Cc">
+                <input
+                  className={INPUT_CLASS}
+                  value={form.ccText}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, ccText: e.target.value }))
+                  }
+                  placeholder="optional"
+                  aria-label="Cc recipients"
+                />
+              </EditField>
+              <EditField label="Subject">
+                <input
+                  className={INPUT_CLASS}
+                  value={form.subject}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, subject: e.target.value }))
+                  }
+                  aria-label="Subject"
+                />
+              </EditField>
+              <EditField label="Message">
+                <textarea
+                  className={clsx(INPUT_CLASS, "min-h-56 resize-y leading-relaxed")}
+                  value={form.body}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, body: e.target.value }))
+                  }
+                  aria-label="Message body"
+                />
+              </EditField>
+              {c.attachments.length > 0 && (
+                <p className="flex items-center gap-1.5 font-mono text-[11px] text-faint">
+                  <Paperclip className="size-3" />
+                  {c.attachments.join(" · ")} — kept on save
+                </p>
+              )}
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <span className="text-[11px] leading-snug text-faint">
+                  {c.sendable
+                    ? "Saves to the Gmail draft — Send goes out exactly as saved."
+                    : "Saves to the Gmail draft. You still press Send in Gmail."}
+                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <ActionButton
+                    variant="quiet"
+                    disabled={save.isPending || send.isPending}
+                    aria-label="Cancel editing"
+                    onClick={() => updateEditing(false)}
+                  >
+                    Cancel
+                  </ActionButton>
+                  <ActionButton
+                    variant={c.sendable ? "quiet" : "primary"}
+                    busy={save.isPending}
+                    disabled={send.isPending}
+                    aria-label={`Save draft to Gmail: ${item.summary}`}
+                    onClick={() => save.mutate(formPayload())}
+                  >
+                    Save to Gmail
+                  </ActionButton>
+                  {c.sendable && (
+                    <ActionButton
+                      variant="primary"
+                      busy={save.isPending || send.isPending}
+                      aria-label={`Save and send draft: ${item.summary}`}
+                      onClick={() => setSaveSendOpen(true)}
+                    >
+                      Save &amp; send
+                    </ActionButton>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1.5 border-b border-hairline pb-3">
+                <MetaLine label="To" value={c.to.join(", ")} />
+                <MetaLine label="Cc" value={c.cc.join(", ")} />
+                <MetaLine label="Subj" value={c.subject} />
+              </div>
+              <div className="mt-3 max-h-[26rem] overflow-y-auto whitespace-pre-wrap text-[14px] leading-relaxed text-ink/90">
+                {c.body || (
+                  <span className="italic text-faint">(empty draft)</span>
+                )}
+              </div>
+              {c.attachments.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5 border-t border-hairline pt-3">
+                  {c.attachments.map((name) => (
+                    <span
+                      key={name}
+                      className="inline-flex items-center gap-1 rounded-md border border-hairline bg-surface px-2 py-1 font-mono text-[11px] text-muted"
+                    >
+                      <Paperclip className="size-3 text-faint" />
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {c.editable && (
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={startEdit}
+                    className="inline-flex items-center gap-1.5 text-[13px] font-medium text-green transition-colors hover:text-green-deep"
+                  >
+                    <PenLine className="size-3.5" />
+                    Edit draft
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={saveSendOpen}
+        title="Save & send?"
+        confirmLabel="Send now"
+        onClose={() => setSaveSendOpen(false)}
+        onConfirm={async () => {
+          setSaveSendOpen(false);
+          // Save first so exactly what's on screen goes out; a failed save
+          // aborts (its own error toast has fired).
+          try {
+            await save.mutateAsync(formPayload());
+          } catch {
+            return;
+          }
+          send.mutate({ path: `/api/drafts/${item.id}/send` });
+        }}
+      >
+        <MetaLine label="To" value={splitAddresses(form.toText).join(", ")} />
+        <MetaLine label="Cc" value={splitAddresses(form.ccText).join(", ")} />
+        <MetaLine label="Subj" value={form.subject} />
+        <p className="pt-1 text-[12px] leading-snug text-muted">
+          Saves your edits to the Gmail draft first, then sends.
+        </p>
+      </ConfirmDialog>
+    </div>
+  );
+}
+
 export function DraftRow({ item }: { item: DraftItem }) {
   const [leaving, setLeaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
   const action = useRowAction(() => setLeaving(true));
+  const queryClient = useQueryClient();
+  const content = useDraftContent(item);
+  const c = content.data;
+
+  const send = useRowAction(() => {
+    // The row is leaving — drop its cached content along with it.
+    queryClient.removeQueries({ queryKey: ["draft-content", item.id] });
+    setLeaving(true);
+  });
+
+  // Hidden while the edit form is open: the saved draft on Gmail may lag the
+  // unsaved edits on screen — "Save & send" in the form covers that path.
+  const showSend = !!c?.sendable && !editing;
 
   return (
     <Row leaving={leaving}>
@@ -211,13 +572,18 @@ export function DraftRow({ item }: { item: DraftItem }) {
 
       {item.review_note && (
         <details className="group mt-2">
-          <summary className="cursor-pointer text-[13px] font-medium text-green">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[13px] font-medium text-green transition-colors hover:text-green-deep [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
             Review note
           </summary>
           <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-paper p-3 font-mono text-xs leading-relaxed text-muted">
             {item.review_note}
           </pre>
         </details>
+      )}
+
+      {item.open_label === "Open draft" && (
+        <DraftPreview item={item} send={send} onEditingChange={setEditing} />
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -229,14 +595,53 @@ export function DraftRow({ item }: { item: DraftItem }) {
           <ExternalLink className="ml-1.5 size-3.5 text-faint" />
         </OpenLink>
         <ActionButton
-          variant="primary"
+          variant={showSend ? "quiet" : "primary"}
           busy={action.isPending}
+          disabled={send.isPending}
           aria-label={`Mark draft done: ${item.summary}`}
           onClick={() => action.mutate({ path: `/api/drafts/${item.id}/done` })}
         >
           Done
         </ActionButton>
+        {showSend && (
+          <ActionButton
+            variant="primary"
+            busy={send.isPending}
+            disabled={action.isPending}
+            aria-label={`Send draft: ${item.summary}`}
+            onClick={() => setSendOpen(true)}
+          >
+            Send
+          </ActionButton>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={sendOpen}
+        title="Send this draft?"
+        confirmLabel="Send now"
+        onClose={() => setSendOpen(false)}
+        onConfirm={() => {
+          setSendOpen(false);
+          send.mutate({ path: `/api/drafts/${item.id}/send` });
+        }}
+      >
+        {c && (
+          <>
+            <MetaLine label="To" value={c.to.join(", ")} />
+            <MetaLine label="Cc" value={c.cc.join(", ")} />
+            <MetaLine label="Subj" value={c.subject} />
+          </>
+        )}
+        {item.review_note && (
+          <p className="pt-1 text-[12px] leading-snug text-amber">
+            Review note attached — check it before sending.
+          </p>
+        )}
+        <p className="pt-1 text-[12px] leading-snug text-muted">
+          Goes out exactly as staged in Gmail.
+        </p>
+      </ConfirmDialog>
     </Row>
   );
 }
