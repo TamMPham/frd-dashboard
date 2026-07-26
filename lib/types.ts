@@ -24,6 +24,8 @@ export interface DecisionItem {
   status: string;
   project: string;
   sender: string;
+  message_id: string | null;
+  received_at: string | null;
 }
 
 export interface DelegationTarget {
@@ -37,13 +39,14 @@ export interface DraftItem {
   type_label: string;
   summary: string;
   flags: string[];
-  review_note: string;
   delegation: DelegationTarget[];
   delegation_missing: boolean;
   open_url: string;
   open_label: "Open draft" | "Open email";
   status: string;
   status_label: string;
+  message_id: string | null;
+  received_at: string | null;
 }
 
 // The staged Gmail draft's live content, read for the inline preview/editor.
@@ -90,6 +93,16 @@ export interface FyiItem {
   sender: string;
   gist: string;
   open_url: string;
+  received_at: string | null;
+}
+
+// A stored email's cleaned plain text for the inline Read email panel.
+export interface EmailBody {
+  message_id: string;
+  subject: string;
+  sender: string;
+  received_at: string | null;
+  body: string;
 }
 
 export interface CountEntry {

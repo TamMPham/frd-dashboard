@@ -16,6 +16,7 @@ import { api, ApiError } from "@/lib/api";
 import { DEV_AUTH_BYPASS } from "@/lib/env";
 import type { ActionResult, DashboardPayload } from "@/lib/types";
 
+import { ConfirmButton, useRowAction } from "./actions";
 import {
   EmptyState,
   FyiRow,
@@ -52,17 +53,22 @@ function SectionHeading({
   id,
   title,
   detail,
+  action,
 }: {
   id: string;
   title: string;
   detail: string;
+  action?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-baseline justify-between gap-4">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
       <h2 id={`${id}-heading`} className="font-display text-2xl font-medium">
         {title}
       </h2>
-      <span className="font-mono text-[11px] text-faint">{detail}</span>
+      <span className="flex shrink-0 items-baseline gap-3">
+        <span className="font-mono text-[11px] text-faint">{detail}</span>
+        {action}
+      </span>
     </div>
   );
 }
@@ -87,6 +93,10 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
     onError: (e) =>
       toast(e instanceof ApiError ? e.message : "Refresh failed", false),
   });
+
+  // Toast + queue refetch come from useRowAction; there is no single row to
+  // collapse, the refetch simply empties the section.
+  const fyiDismissAll = useRowAction();
 
   const t = data?.totals;
 
@@ -300,7 +310,21 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
               <SectionHeading
                 id="fyi"
                 title="FYI — no action needed"
-                detail={`${data.totals.fyi} in the last 24h`}
+                detail={`${data.totals.fyi} in the last 7 days`}
+                action={
+                  data.totals.fyi > 0 ? (
+                    <ConfirmButton
+                      label="Dismiss all"
+                      confirmLabel="Dismiss all FYIs"
+                      variant="admin"
+                      busy={fyiDismissAll.isPending}
+                      ariaLabel="Dismiss all FYI items"
+                      onConfirm={() =>
+                        fyiDismissAll.mutate({ path: "/api/fyi/dismiss_all" })
+                      }
+                    />
+                  ) : undefined
+                }
               />
               {data.fyi.length > 0 ? (
                 <div
@@ -312,7 +336,7 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
                   ))}
                 </div>
               ) : (
-                <EmptyState>No FYIs in the last 24 hours.</EmptyState>
+                <EmptyState>No FYIs in the last 7 days.</EmptyState>
               )}
             </section>
 

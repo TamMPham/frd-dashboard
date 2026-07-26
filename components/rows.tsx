@@ -10,6 +10,7 @@ import {
   Paperclip,
   PenLine,
   ShieldAlert,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -19,6 +20,7 @@ import type {
   DraftContent,
   DraftContentUpdate,
   DraftItem,
+  EmailBody,
   FyiItem,
   ReminderItem,
   SecurityItem,
@@ -63,6 +65,135 @@ function Row({
     >
       {children}
     </article>
+  );
+}
+
+/** "22 Jul · 3:41 pm" — when the source email arrived. */
+function formatReceived(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return (
+    d.toLocaleDateString(undefined, { day: "numeric", month: "short" }) +
+    " · " +
+    d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+  );
+}
+
+function ReceivedStamp({ iso }: { iso: string | null }) {
+  const text = formatReceived(iso);
+  if (!text) return null;
+  return (
+    <span className="font-mono text-[11px] text-faint">received {text}</span>
+  );
+}
+
+const EMAIL_STALE_MS = 5 * 60_000;
+
+/** Warm the email-body cache from hover/focus so opening feels instant. */
+function useEmailPrefetch(messageId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  return () => {
+    if (!messageId) return;
+    queryClient.prefetchQuery({
+      queryKey: ["email-body", messageId],
+      queryFn: () => api<EmailBody>(`/api/emails/${messageId}`),
+      staleTime: EMAIL_STALE_MS,
+    });
+  };
+}
+
+/**
+ * The original email as quoted correspondence — so Peter can see what he's
+ * dealing with without the Gmail round-trip that loses his spot in the
+ * queue. Mounted only while its disclosure is open, so the body loads
+ * lazily and stays cached for 5 minutes.
+ */
+function EmailBodyPanel({ messageId }: { messageId: string }) {
+  const email = useQuery({
+    queryKey: ["email-body", messageId],
+    queryFn: () => api<EmailBody>(`/api/emails/${messageId}`),
+    staleTime: EMAIL_STALE_MS,
+    retry: 1,
+  });
+
+  const meta = email.data
+    ? ["From " + email.data.sender, formatReceived(email.data.received_at)]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+  return (
+    <div className="rounded-lg border-l-2 border-hairline-strong bg-paper py-3 pl-4 pr-3">
+      {email.isPending ? (
+        <div className="space-y-2" aria-hidden>
+          <div className="h-3 w-1/3 animate-pulse rounded bg-hairline" />
+          <div className="h-3 w-full animate-pulse rounded bg-hairline" />
+          <div className="h-3 w-4/5 animate-pulse rounded bg-hairline" />
+        </div>
+      ) : email.isError ? (
+        <p className="text-[13px] text-faint">
+          Couldn&apos;t load this email — use the Open thread link instead.
+        </p>
+      ) : email.data && !email.data.body ? (
+        <p className="text-[13px] text-faint">
+          No text content in this email — open it in Gmail.
+        </p>
+      ) : email.data ? (
+        <>
+          <p className="mb-2 font-mono text-[11px] text-faint">{meta}</p>
+          {/* The bottom fade covers only the padding once scrolled to the
+              end, so it hints at more content without hiding any. */}
+          <div className="max-h-80 overflow-y-auto whitespace-pre-wrap pb-5 text-sm leading-relaxed text-ink [mask-image:linear-gradient(to_bottom,black_calc(100%-1.25rem),transparent)]">
+            {email.data.body}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Self-contained disclosure + panel, used by FYI rows (each FYI row is its
+ * own heading). Thread cards render their single toggle in the card header
+ * instead — see ThreadGroupCard.
+ */
+function EmailPeek({
+  messageId,
+  subject,
+  label = "Read email",
+}: {
+  messageId: string | null;
+  subject: string;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const prefetch = useEmailPrefetch(messageId);
+
+  if (!messageId) return null;
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        onPointerEnter={prefetch}
+        onFocus={prefetch}
+        aria-expanded={open}
+        aria-label={`${label}: ${subject}`}
+        className="flex min-h-11 cursor-pointer items-center gap-1.5 text-[13px] font-medium text-green transition-colors hover:text-green-deep lg:min-h-6"
+      >
+        <ChevronRight
+          className={clsx("size-3.5 transition-transform", open && "rotate-90")}
+        />
+        {label}
+      </button>
+      {open && (
+        <div className="mt-2">
+          <EmailBodyPanel messageId={messageId} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -570,18 +701,6 @@ export function DraftRow({ item }: { item: DraftItem }) {
       )}
       {item.flags.length > 0 && <WarnLine>{item.flags.join("; ")}</WarnLine>}
 
-      {item.review_note && (
-        <details className="group mt-2">
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[13px] font-medium text-green transition-colors hover:text-green-deep [&::-webkit-details-marker]:hidden">
-            <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
-            Review note
-          </summary>
-          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-lg bg-paper p-3 font-mono text-xs leading-relaxed text-muted">
-            {item.review_note}
-          </pre>
-        </details>
-      )}
-
       {item.open_label === "Open draft" && (
         <DraftPreview item={item} send={send} onEditingChange={setEditing} />
       )}
@@ -633,11 +752,6 @@ export function DraftRow({ item }: { item: DraftItem }) {
             <MetaLine label="Subj" value={c.subject} />
           </>
         )}
-        {item.review_note && (
-          <p className="pt-1 text-[12px] leading-snug text-amber">
-            Review note attached — check it before sending.
-          </p>
-        )}
         <p className="pt-1 text-[12px] leading-snug text-muted">
           Goes out exactly as staged in Gmail.
         </p>
@@ -651,6 +765,16 @@ export function DraftRow({ item }: { item: DraftItem }) {
 export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
   const count = group.decisions.length + group.drafts.length;
   const noun = group.decisions.length > 0 ? "action" : "draft";
+  const [emailOpen, setEmailOpen] = useState(false);
+  // One Read email per card: the thread's most recently received trigger
+  // email (a card can group actions from several messages).
+  const source = [...group.decisions, ...group.drafts]
+    .filter((i) => i.message_id)
+    .sort((a, b) =>
+      (b.received_at ?? "").localeCompare(a.received_at ?? ""),
+    )[0];
+  const prefetch = useEmailPrefetch(source?.message_id);
+
   return (
     <section className="rounded-xl border border-hairline bg-surface px-5 pb-1 pt-4 shadow-[0_1px_2px_rgba(20,18,10,0.04)]">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-hairline pb-3">
@@ -658,21 +782,45 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
           <h3 className="font-display text-lg font-medium leading-tight">
             {group.subject}
           </h3>
-          <p className="mt-0.5 truncate text-[13px] text-muted">
-            {[
-              group.senders[0] &&
-                `From: ${group.senders[0]}${group.senders.length > 1 ? ` +${group.senders.length - 1} more` : ""}`,
-              group.projects[0] &&
-                `Project: ${group.projects[0]}${group.projects.length > 1 ? ` +${group.projects.length - 1} more` : ""}`,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
+          <p className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[13px] text-muted">
+            {(group.senders[0] || group.projects[0]) && (
+              <span className="min-w-0 truncate">
+                {[
+                  group.senders[0] &&
+                    `From: ${group.senders[0]}${group.senders.length > 1 ? ` +${group.senders.length - 1} more` : ""}`,
+                  group.projects[0] &&
+                    `Project: ${group.projects[0]}${group.projects.length > 1 ? ` +${group.projects.length - 1} more` : ""}`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            )}
+            <ReceivedStamp iso={source?.received_at ?? null} />
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <span className="font-mono text-[11px] text-faint">
             {count} {count === 1 ? noun : `${noun}s`}
           </span>
+          {source?.message_id && (
+            <button
+              type="button"
+              onClick={() => setEmailOpen((o) => !o)}
+              onPointerEnter={prefetch}
+              onFocus={prefetch}
+              aria-expanded={emailOpen}
+              aria-label={`Read latest email: ${group.subject}`}
+              className="flex cursor-pointer items-center gap-1 text-[13px] font-medium text-green transition-colors hover:text-green-deep"
+            >
+              <ChevronRight
+                className={clsx(
+                  "size-3.5 transition-transform",
+                  emailOpen && "rotate-90",
+                )}
+              />
+              Read email
+            </button>
+          )}
           {group.open_url && (
             <a
               href={group.open_url}
@@ -686,6 +834,11 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
           )}
         </div>
       </div>
+      {emailOpen && source?.message_id && (
+        <div className="border-b border-hairline py-3">
+          <EmailBodyPanel messageId={source.message_id} />
+        </div>
+      )}
       <div role="list">
         {group.decisions.map((d) => (
           <DecisionRow key={d.id} item={d} />
@@ -770,27 +923,59 @@ export function ReminderRow({ item }: { item: ReminderItem }) {
 /* ── FYI ───────────────────────────────────────────────────────────────── */
 
 export function FyiRow({ item }: { item: FyiItem }) {
+  const [leaving, setLeaving] = useState(false);
+  const action = useRowAction(() => setLeaving(true));
+
   return (
-    <Row leaving={false}>
+    <Row leaving={leaving}>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <p className="font-medium leading-snug">{item.subject}</p>
-          {item.sender && (
-            <p className="mt-0.5 text-[13px] text-muted">{item.sender}</p>
+          {(item.sender || item.received_at) && (
+            <p className="mt-0.5 text-[13px] text-muted">
+              {item.sender}
+              {item.sender && item.received_at ? " · " : ""}
+              {item.received_at && (
+                <span className="font-mono text-[11px] text-faint">
+                  {formatReceived(item.received_at)}
+                </span>
+              )}
+            </p>
           )}
           {item.gist && (
             <p className="mt-1 text-sm leading-relaxed text-muted">
               {item.gist}
             </p>
           )}
+          <EmailPeek
+            messageId={item.message_id}
+            subject={item.subject}
+            label="Read full email"
+          />
         </div>
-        <OpenLink
-          href={item.open_url}
-          ariaLabel={`Open FYI email: ${item.subject} (opens Gmail)`}
-        >
-          Open email
-          <ExternalLink className="ml-1.5 size-3.5 text-faint" />
-        </OpenLink>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <OpenLink
+            href={item.open_url}
+            ariaLabel={`Open FYI email: ${item.subject} (opens Gmail)`}
+          >
+            Open email
+            <ExternalLink className="ml-1.5 size-3.5 text-faint" />
+          </OpenLink>
+          <ActionButton
+            variant="admin"
+            busy={action.isPending}
+            aria-label={`Dismiss FYI: ${item.subject}`}
+            onClick={() =>
+              action.mutate({
+                path: "/api/fyi/dismiss",
+                body: { message_id: item.message_id },
+              })
+            }
+          >
+            <X className="size-3.5" />
+            Dismiss
+          </ActionButton>
+        </div>
       </div>
     </Row>
   );
