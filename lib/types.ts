@@ -71,6 +71,7 @@ export interface DraftContentUpdate {
 
 export interface ThreadGroup {
   key: string;
+  thread_id: string; // Gmail thread id, "" for message/item-keyed groups
   subject: string;
   senders: string[];
   projects: string[];
@@ -79,10 +80,61 @@ export interface ThreadGroup {
   drafts: DraftItem[];
 }
 
+// One message in the full-thread view, parsed live from Gmail.
+export interface ThreadMessage {
+  message_id: string;
+  from_name: string;
+  from_email: string;
+  to: string[];
+  date: string | null;
+  body: string;
+  truncated: boolean;
+}
+
+export interface ThreadView {
+  thread_id: string;
+  subject: string;
+  messages: ThreadMessage[]; // oldest first
+}
+
+// Optional body for POST /drafts/{id}/send.
+export interface DraftSendBody {
+  follow_up: boolean;
+  follow_up_days: number;
+}
+
+// One recipient-autocomplete entry for the draft editor.
+export interface ContactSuggestion {
+  email: string;
+  name: string;
+  source: "internal" | "directory" | "history";
+}
+
+// ── Consultants (sender directory) ──────────────────────────────────────────
+
+export interface ConsultantBody {
+  pattern: string;
+  match_type: "domain" | "email";
+  party_name: string;
+  role: string;
+  tier: "routine" | "elevated" | "sensitive";
+  never_noise: boolean;
+  notes: string;
+}
+
+export interface ConsultantEntry extends ConsultantBody {
+  id: number;
+}
+
+// `note` is the task; subject/sender/open_url are hydrated from the
+// reminder's thread so the row names the conversation and links to it.
 export interface ReminderItem {
   id: number;
   note: string;
+  subject: string;
+  sender: string;
   project: string;
+  open_url: string;
   due_at: string | null;
   overdue: boolean;
 }

@@ -10,13 +10,17 @@ import {
   PenLine,
   RefreshCw,
   ShieldAlert,
+  Users,
 } from "lucide-react";
+import Link from "next/link";
+import { useMemo } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import { DEV_AUTH_BYPASS } from "@/lib/env";
-import type { ActionResult, DashboardPayload } from "@/lib/types";
+import type { ActionResult, DashboardPayload, ThreadGroup } from "@/lib/types";
 
 import { ConfirmButton, useRowAction } from "./actions";
+import { CompletedProvider, mergeCompleted, useCompleted } from "./completed";
 import {
   EmptyState,
   FyiRow,
@@ -74,8 +78,17 @@ function SectionHeading({
 }
 
 export default function Dashboard({ userEmail }: { userEmail: string }) {
+  return (
+    <CompletedProvider>
+      <DashboardInner userEmail={userEmail} />
+    </CompletedProvider>
+  );
+}
+
+function DashboardInner({ userEmail }: { userEmail: string }) {
   const toast = useToast();
   const queryClient = useQueryClient();
+  const completed = useCompleted();
 
   const { data, error, isPending, dataUpdatedAt } = useQuery({
     queryKey: ["dashboard"],
@@ -88,6 +101,8 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
     mutationFn: () => api<ActionResult>("/api/refresh", { method: "POST" }),
     onSuccess: (r) => {
       toast(r.message, true);
+      // An explicit refresh is the natural moment to compact the queue.
+      completed.clear();
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (e) =>
@@ -100,6 +115,37 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
 
   const t = data?.totals;
 
+  // A thread with both a decision and a draft used to split across two
+  // sections; here the decision card also carries the thread's drafts so
+  // Peter can review and send in one place (the Drafts section keeps its
+  // own copy). Tombstoned rows are re-injected so completed work holds its
+  // place until the next explicit refresh.
+  const draftsAlsoListed = useMemo(() => {
+    if (!data) return new Set<string>();
+    const draftKeys = new Set(data.drafts.map((g) => g.key));
+    return new Set(
+      data.decisions.filter((g) => draftKeys.has(g.key)).map((g) => g.key),
+    );
+  }, [data]);
+
+  const decisionGroups: ThreadGroup[] = useMemo(() => {
+    if (!data) return [];
+    const draftsByKey = new Map(data.drafts.map((g) => [g.key, g]));
+    const merged = data.decisions.map((g) => {
+      const extra = draftsByKey.get(g.key)?.drafts ?? [];
+      return extra.length > 0
+        ? { ...g, drafts: [...g.drafts, ...extra] }
+        : g;
+    });
+    return mergeCompleted("decisions", merged, completed.entries);
+  }, [data, completed.entries]);
+
+  const draftGroups: ThreadGroup[] = useMemo(
+    () =>
+      data ? mergeCompleted("drafts", data.drafts, completed.entries) : [],
+    [data, completed.entries],
+  );
+
   const rail = (
     <nav aria-label="Sections" className="space-y-1">
       {NAV.map(({ id, label, icon: Icon }) => {
@@ -108,6 +154,7 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
           <a
             key={id}
             href={`#${id}`}
+            onClick={() => completed.clear()}
             className="group flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium text-muted transition-colors hover:bg-green-tint hover:text-green"
           >
             <span className="flex items-center gap-2.5">
@@ -152,6 +199,13 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
             </a>
           )}
           <div className="mt-auto space-y-3 border-t border-hairline pt-4">
+            <Link
+              href="/consultants"
+              className="flex items-center gap-2 text-sm font-medium text-muted transition-colors hover:text-green"
+            >
+              <Users className="size-4" />
+              Consultants
+            </Link>
             <button
               onClick={() => refresh.mutate()}
               disabled={refresh.isPending}
@@ -184,16 +238,25 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
         <h1 className="font-display text-2xl font-medium tracking-tight">
           Donna
         </h1>
-        <button
-          onClick={() => refresh.mutate()}
-          disabled={refresh.isPending}
-          aria-label="Refresh the queue"
-          className="rounded-lg p-2 text-muted disabled:opacity-60"
-        >
-          <RefreshCw
-            className={clsx("size-5", refresh.isPending && "animate-spin")}
-          />
-        </button>
+        <div className="flex items-center gap-1">
+          <Link
+            href="/consultants"
+            aria-label="Manage consultants"
+            className="rounded-lg p-2 text-muted"
+          >
+            <Users className="size-5" />
+          </Link>
+          <button
+            onClick={() => refresh.mutate()}
+            disabled={refresh.isPending}
+            aria-label="Refresh the queue"
+            className="rounded-lg p-2 text-muted disabled:opacity-60"
+          >
+            <RefreshCw
+              className={clsx("size-5", refresh.isPending && "animate-spin")}
+            />
+          </button>
+        </div>
       </header>
 
       <main className="flex-1 space-y-10 px-5 pb-28 pt-6 lg:px-0 lg:py-8">
@@ -249,9 +312,15 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
                 title="Needs your decision"
                 detail={`${data.totals.decisions} action${data.totals.decisions === 1 ? "" : "s"} in ${data.totals.decision_threads} thread${data.totals.decision_threads === 1 ? "" : "s"}`}
               />
-              {data.decisions.length > 0 ? (
-                data.decisions.map((g) => (
-                  <ThreadGroupCard key={g.key} group={g} />
+              {decisionGroups.length > 0 ? (
+                decisionGroups.map((g, i) => (
+                  <ThreadGroupCard
+                    key={g.key}
+                    group={g}
+                    section="decisions"
+                    groupIndex={i}
+                    draftsAlsoListed={draftsAlsoListed.has(g.key)}
+                  />
                 ))
               ) : (
                 <EmptyState>Nothing waiting on a decision. All clear.</EmptyState>
@@ -269,8 +338,15 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
                 title="Drafts waiting for your Send"
                 detail={`${data.totals.drafts} draft${data.totals.drafts === 1 ? "" : "s"} in ${data.totals.draft_threads} thread${data.totals.draft_threads === 1 ? "" : "s"}`}
               />
-              {data.drafts.length > 0 ? (
-                data.drafts.map((g) => <ThreadGroupCard key={g.key} group={g} />)
+              {draftGroups.length > 0 ? (
+                draftGroups.map((g, i) => (
+                  <ThreadGroupCard
+                    key={g.key}
+                    group={g}
+                    section="drafts"
+                    groupIndex={i}
+                  />
+                ))
               ) : (
                 <EmptyState>No drafts waiting.</EmptyState>
               )}
@@ -320,7 +396,17 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
                       busy={fyiDismissAll.isPending}
                       ariaLabel="Dismiss all FYI items"
                       onConfirm={() =>
-                        fyiDismissAll.mutate({ path: "/api/fyi/dismiss_all" })
+                        // A deliberate whole-section action: emptying it at
+                        // once is the expected outcome, so refetch now.
+                        fyiDismissAll.mutate(
+                          { path: "/api/fyi/dismiss_all" },
+                          {
+                            onSuccess: () =>
+                              queryClient.invalidateQueries({
+                                queryKey: ["dashboard"],
+                              }),
+                          },
+                        )
                       }
                     />
                   ) : undefined
@@ -361,6 +447,7 @@ export default function Dashboard({ userEmail }: { userEmail: string }) {
             <a
               key={id}
               href={`#${id}`}
+              onClick={() => completed.clear()}
               className="relative flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[11px] font-medium text-muted"
             >
               <Icon className="size-5" />

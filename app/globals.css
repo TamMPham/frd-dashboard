@@ -86,33 +86,19 @@ body {
   animation: rise-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* Row check-off: collapse out after a completed action. */
-.row-leaving {
-  opacity: 0;
-  transform: translateX(6px) scale(0.99);
-  max-height: 0 !important;
-  margin: 0 !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  overflow: hidden;
-  transition:
-    opacity 0.28s ease,
-    transform 0.28s ease,
-    max-height 0.34s ease 0.08s,
-    padding 0.34s ease 0.08s,
-    margin 0.34s ease 0.08s;
-}
-
-.row-live {
-  max-height: 60rem;
-  transition: none;
+/* Row check-off: the row keeps its height and settles into a greyed
+   tombstone — nothing below it moves, so the next click can't land on the
+   wrong row. */
+.row-done {
+  opacity: 0.55;
+  transition: opacity 0.25s ease;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .rise {
     animation: none;
   }
-  .row-leaving {
+  .row-done {
     transition: none;
   }
 }

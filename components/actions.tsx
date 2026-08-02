@@ -11,11 +11,14 @@ import type { ActionResult } from "@/lib/types";
 import { useToast } from "./toast";
 
 /**
- * One mutation per row action. On success the row collapses (the caller keeps
- * `leaving` state) and the queue refetches; a 409 means another surface (the
- * digest email, another tab) got there first — also fine, just resync.
+ * One mutation per row action. On success the row stays put as a full-height
+ * "✓ done" tombstone (the caller marks it in the completed set via a
+ * per-call onSuccess) — no collapse, no immediate refetch, so nothing shifts
+ * under Peter's cursor; the 60s poll brings the fresh payload. A 409/404
+ * means another surface (the digest email, another tab) got there first —
+ * resync right away.
  */
-export function useRowAction(onDone?: () => void) {
+export function useRowAction() {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
@@ -26,19 +29,12 @@ export function useRowAction(onDone?: () => void) {
       }),
     onSuccess: (result) => {
       toast(result.message, true);
-      onDone?.();
-      // Give the collapse animation a beat before the refetch reflows.
-      setTimeout(
-        () => queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-        350,
-      );
     },
     onError: (error) => {
       const message =
         error instanceof ApiError ? error.message : "Request failed";
       toast(message, false);
       if (error instanceof ApiError && (error.status === 409 || error.status === 404)) {
-        onDone?.();
         queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       }
     },

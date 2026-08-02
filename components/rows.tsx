@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
   AlertTriangle,
+  Check,
   ChevronRight,
   ExternalLink,
   Loader2,
@@ -16,20 +17,33 @@ import { useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
 import type {
+  ContactSuggestion,
   DecisionItem,
   DraftContent,
   DraftContentUpdate,
   DraftItem,
+  DraftSendBody,
   EmailBody,
   FyiItem,
   ReminderItem,
   SecurityItem,
   ThreadGroup,
+  ThreadView,
 } from "@/lib/types";
 
 import { ActionButton, ConfirmButton, OpenLink, useRowAction } from "./actions";
+import { type Section, useCompleted } from "./completed";
 import { ConfirmDialog } from "./confirm-dialog";
+import { RecipientInput } from "./recipient-input";
 import { useToast } from "./toast";
+
+/** Where a thread-section row lives, so its tombstone can hold its place. */
+export interface RowCtx {
+  section: Section;
+  group: ThreadGroup;
+  groupIndex: number;
+  rowIndex: number;
+}
 
 function Badge({ children }: { children: React.ReactNode }) {
   return (
@@ -49,10 +63,10 @@ function WarnLine({ children }: { children: React.ReactNode }) {
 }
 
 function Row({
-  leaving,
+  done,
   children,
 }: {
-  leaving: boolean;
+  done?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -60,11 +74,29 @@ function Row({
       role="listitem"
       className={clsx(
         "border-t border-hairline py-4 first:border-t-0",
-        leaving ? "row-leaving" : "row-live",
+        done && "row-done",
       )}
     >
       {children}
     </article>
+  );
+}
+
+/**
+ * Replaces a row's button strip once its action lands: same height as the
+ * buttons it stands in for, so the row — and everything below it — keeps its
+ * exact place until the next natural refresh.
+ */
+function CompletedMark({ label }: { label: string }) {
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      className="mt-3 flex min-h-11 items-center gap-1.5 text-[13px] font-medium text-green lg:min-h-9"
+    >
+      <Check className="size-4" />
+      {label}
+    </p>
   );
 }
 
@@ -197,22 +229,212 @@ function EmailPeek({
   );
 }
 
+/* ── Full thread view ──────────────────────────────────────────────────── */
+
+const THREAD_STALE_MS = 5 * 60_000;
+
+function threadQueryOpts(threadId: string) {
+  return {
+    queryKey: ["thread", threadId] as const,
+    queryFn: () => api<ThreadView>(`/api/threads/${threadId}`),
+    staleTime: THREAD_STALE_MS,
+    retry: 1,
+  };
+}
+
+/** Warm the thread cache from hover/focus so opening feels instant. */
+function useThreadPrefetch(threadId: string) {
+  const queryClient = useQueryClient();
+  return () => {
+    if (!threadId) return;
+    queryClient.prefetchQuery(threadQueryOpts(threadId));
+  };
+}
+
+/**
+ * The whole conversation, Gmail-style: older messages collapse to one-line
+ * headers (click to expand each), the latest arrives open. Read live from
+ * Gmail so Peter's own replies are included; mounted only while the
+ * disclosure is open so the round-trip is lazy and cached.
+ */
+function ThreadPanel({ threadId }: { threadId: string }) {
+  const thread = useQuery(threadQueryOpts(threadId));
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
+
+  const messages = thread.data?.messages ?? [];
+
+  return (
+    <div className="rounded-lg border-l-2 border-hairline-strong bg-paper py-1 pl-4 pr-3">
+      {thread.isPending ? (
+        <div className="space-y-2 py-2" aria-hidden>
+          <div className="h-3 w-1/3 animate-pulse rounded bg-hairline" />
+          <div className="h-3 w-full animate-pulse rounded bg-hairline" />
+          <div className="h-3 w-4/5 animate-pulse rounded bg-hairline" />
+        </div>
+      ) : thread.isError ? (
+        <p className="py-2 text-[13px] text-faint">
+          Couldn&apos;t load the thread — use the Open thread link instead.
+        </p>
+      ) : messages.length === 0 ? (
+        <p className="py-2 text-[13px] text-faint">
+          No messages found — open the thread in Gmail.
+        </p>
+      ) : (
+        messages.map((m, i) => {
+          const isLast = i === messages.length - 1;
+          const isOpen = toggled[m.message_id] ?? isLast;
+          const who = m.from_name || m.from_email || "(unknown sender)";
+          const stamp = formatReceived(m.date);
+          return (
+            <div
+              key={m.message_id}
+              className={clsx(
+                "py-2",
+                i > 0 && "border-t border-hairline",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() =>
+                  setToggled((t) => ({ ...t, [m.message_id]: !isOpen }))
+                }
+                aria-expanded={isOpen}
+                aria-label={`${isOpen ? "Collapse" : "Expand"} message from ${who}`}
+                className="flex w-full min-w-0 cursor-pointer items-baseline gap-2 text-left"
+              >
+                <ChevronRight
+                  className={clsx(
+                    "size-3 shrink-0 translate-y-0.5 text-faint transition-transform",
+                    isOpen && "rotate-90",
+                  )}
+                />
+                <span
+                  className={clsx(
+                    "shrink-0 text-[13px]",
+                    isLast ? "font-medium text-ink" : "text-muted",
+                  )}
+                >
+                  {who}
+                </span>
+                {stamp && (
+                  <span className="shrink-0 font-mono text-[11px] text-faint">
+                    {stamp}
+                  </span>
+                )}
+                {!isOpen && (
+                  <span className="min-w-0 truncate text-[13px] text-faint">
+                    {m.body.replace(/\s+/g, " ").slice(0, 90)}
+                  </span>
+                )}
+              </button>
+              {isOpen && (
+                <div className="mt-1.5 pl-5">
+                  <div className="max-h-80 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-ink">
+                    {m.body || (
+                      <span className="italic text-faint">
+                        (no text content)
+                      </span>
+                    )}
+                  </div>
+                  {m.truncated && (
+                    <p className="mt-1 font-mono text-[11px] text-faint">
+                      …trimmed — Open thread in Gmail for the full text.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+/* ── Send-time follow-up ───────────────────────────────────────────────── */
+
+/**
+ * The "follow up if no reply" fields inside the Send dialogs. Unticked by
+ * default; ticking schedules one follow-up on the thread (back-and-forth on
+ * the same thread refreshes it rather than stacking duplicates).
+ */
+function FollowUpFields({
+  checked,
+  days,
+  onCheckedChange,
+  onDaysChange,
+}: {
+  checked: boolean;
+  days: number;
+  onCheckedChange: (next: boolean) => void;
+  onDaysChange: (next: number) => void;
+}) {
+  return (
+    <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-paper px-3 py-2.5">
+      <label className="flex cursor-pointer items-center gap-2 text-[13px] text-ink">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onCheckedChange(e.target.checked)}
+          className="size-4 accent-(--green)"
+        />
+        Follow up if no reply
+      </label>
+      <select
+        value={days}
+        disabled={!checked}
+        onChange={(e) => onDaysChange(Number(e.target.value))}
+        aria-label="Follow-up due in"
+        className="h-8 rounded-lg border border-hairline-strong bg-surface px-2 text-[13px] disabled:opacity-45"
+      >
+        <option value={3}>in 3 days</option>
+        <option value={5}>in 5 days</option>
+        <option value={7}>in 1 week</option>
+        <option value={14}>in 2 weeks</option>
+      </select>
+    </div>
+  );
+}
+
 /* ── Decisions ─────────────────────────────────────────────────────────── */
 
-export function DecisionRow({ item }: { item: DecisionItem }) {
-  const [leaving, setLeaving] = useState(false);
+export function DecisionRow({ item, ctx }: { item: DecisionItem; ctx?: RowCtx }) {
+  const completed = useCompleted();
+  const done = completed.get(`item:${item.id}`);
   const [checked, setChecked] = useState<boolean[]>(() =>
     item.files.map(() => true),
   );
-  const action = useRowAction(() => setLeaving(true));
+  const action = useRowAction();
 
-  const post = (verb: string, body?: unknown) =>
-    action.mutate({ path: `/api/items/${item.id}/${verb}`, body });
+  const mark = (label: string) =>
+    completed.mark({
+      key: `item:${item.id}`,
+      label,
+      section: ctx?.section,
+      groupKey: ctx?.group.key,
+      groupIndex: ctx?.groupIndex,
+      rowIndex: ctx?.rowIndex,
+      decision: item,
+      group: ctx?.group,
+    });
+
+  const post = (verb: string, label: string, body?: unknown) =>
+    action.mutate(
+      { path: `/api/items/${item.id}/${verb}`, body },
+      {
+        onSuccess: () => mark(label),
+        onError: (e) => {
+          // Handled elsewhere (digest, another tab) — settle in place.
+          if (e instanceof ApiError && (e.status === 409 || e.status === 404))
+            mark("Done");
+        },
+      },
+    );
 
   const fileable = item.real_approval && !item.unplaced;
 
   return (
-    <Row leaving={leaving}>
+    <Row done={!!done}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge>{item.type_label}</Badge>
         {item.project && (
@@ -223,12 +445,18 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
       {item.tier_flag && <WarnLine>{item.tier_flag}</WarnLine>}
 
       {fileable && item.files.length > 0 && (
-        <ul className="mt-3 space-y-1.5 rounded-lg bg-paper p-3">
+        <ul
+          className={clsx(
+            "mt-3 space-y-1.5 rounded-lg bg-paper p-3",
+            done && "pointer-events-none",
+          )}
+        >
           {item.files.map((f, i) => (
             <li key={i} className="flex items-start gap-2.5">
               <input
                 type="checkbox"
                 checked={checked[i] ?? true}
+                disabled={!!done}
                 onChange={(e) =>
                   setChecked((c) => {
                     const next = [...c];
@@ -255,6 +483,9 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
         </ul>
       )}
 
+      {done ? (
+        <CompletedMark label={done.label} />
+      ) : (
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {fileable ? (
           <>
@@ -263,7 +494,7 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
               busy={action.isPending}
               aria-label={`File selected documents: ${item.summary}`}
               onClick={() =>
-                post("approve", {
+                post("approve", "Filed", {
                   selected: checked.flatMap((on, i) => (on ? [i] : [])),
                 })
               }
@@ -276,7 +507,7 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
               variant="admin"
               busy={action.isPending}
               ariaLabel={`Send filing to admin: ${item.summary}`}
-              onConfirm={() => post("send_admin")}
+              onConfirm={() => post("send_admin", "Sent to admin")}
             />
             <ConfirmButton
               label="Reject"
@@ -284,7 +515,7 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
               variant="danger"
               busy={action.isPending}
               ariaLabel={`Reject: ${item.summary}`}
-              onConfirm={() => post("reject")}
+              onConfirm={() => post("reject", "Rejected")}
             />
           </>
         ) : item.unplaced ? (
@@ -295,7 +526,7 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
               variant="admin"
               busy={action.isPending}
               ariaLabel={`Send filing to admin: ${item.summary}`}
-              onConfirm={() => post("send_admin")}
+              onConfirm={() => post("send_admin", "Sent to admin")}
             />
             <ConfirmButton
               label="Reject"
@@ -303,7 +534,7 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
               variant="danger"
               busy={action.isPending}
               ariaLabel={`Reject: ${item.summary}`}
-              onConfirm={() => post("reject")}
+              onConfirm={() => post("reject", "Rejected")}
             />
           </>
         ) : (
@@ -311,12 +542,13 @@ export function DecisionRow({ item }: { item: DecisionItem }) {
             variant="primary"
             busy={action.isPending}
             aria-label={`Mark handled: ${item.summary}`}
-            onClick={() => post("approve")}
+            onClick={() => post("approve", "Done")}
           >
             Done
           </ActionButton>
         )}
       </div>
+      )}
     </Row>
   );
 }
@@ -359,11 +591,19 @@ function EditField({
 const INPUT_CLASS =
   "w-full rounded-lg border border-hairline-strong bg-surface px-3 py-2 text-sm text-ink transition-colors placeholder:text-faint focus:border-green focus:outline-none focus:ring-1 focus:ring-green";
 
-function splitAddresses(value: string): string[] {
-  return value
-    .split(",")
-    .map((a) => a.trim())
-    .filter(Boolean);
+/**
+ * The recipient-autocomplete corpus (internal team, sender directory, real
+ * correspondence). Fetched on first edit, then cached for the session —
+ * every RecipientInput shares one query.
+ */
+function useContacts(enabled: boolean) {
+  return useQuery({
+    queryKey: ["contacts"],
+    queryFn: () => api<ContactSuggestion[]>("/api/contacts"),
+    staleTime: 30 * 60_000,
+    gcTime: 60 * 60_000,
+    enabled,
+  });
 }
 
 /**
@@ -382,8 +622,6 @@ function useDraftContent(item: DraftItem) {
   });
 }
 
-type SendAction = ReturnType<typeof useRowAction>;
-
 /**
  * The staged Gmail draft, read live and shown in place so Peter can review —
  * and edit — it without leaving the dashboard. The content query runs on
@@ -396,24 +634,29 @@ type SendAction = ReturnType<typeof useRowAction>;
  */
 function DraftPreview({
   item,
-  send,
+  sending,
+  onSend,
   onEditingChange,
 }: {
   item: DraftItem;
-  send: SendAction;
+  sending: boolean;
+  onSend: (body: DraftSendBody) => void;
   onEditingChange: (editing: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [saveSendOpen, setSaveSendOpen] = useState(false);
-  const [form, setForm] = useState({
-    toText: "",
-    ccText: "",
-    subject: "",
-    body: "",
-  });
+  const [followUp, setFollowUp] = useState(false);
+  const [followUpDays, setFollowUpDays] = useState(3);
+  const [form, setForm] = useState<{
+    to: string[];
+    cc: string[];
+    subject: string;
+    body: string;
+  }>({ to: [], cc: [], subject: "", body: "" });
   const toast = useToast();
   const queryClient = useQueryClient();
+  const contacts = useContacts(editing);
 
   // The row hides its Send button while the form is open so stale saved
   // content can't be sent under unsaved on-screen edits.
@@ -443,8 +686,8 @@ function DraftPreview({
 
   function formPayload(): DraftContentUpdate {
     return {
-      to: splitAddresses(form.toText),
-      cc: splitAddresses(form.ccText),
+      to: form.to,
+      cc: form.cc,
       subject: form.subject,
       body: form.body,
     };
@@ -452,12 +695,7 @@ function DraftPreview({
 
   function startEdit() {
     if (!c) return;
-    setForm({
-      toText: c.to.join(", "),
-      ccText: c.cc.join(", "),
-      subject: c.subject,
-      body: c.body,
-    });
+    setForm({ to: c.to, cc: c.cc, subject: c.subject, body: c.body });
     updateEditing(true);
   }
 
@@ -500,28 +738,20 @@ function DraftPreview({
             </p>
           ) : editing ? (
             <div className="space-y-2.5">
-              <EditField label="To">
-                <input
-                  className={INPUT_CLASS}
-                  value={form.toText}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, toText: e.target.value }))
-                  }
-                  placeholder="name@example.com, …"
-                  aria-label="To recipients"
-                />
-              </EditField>
-              <EditField label="Cc">
-                <input
-                  className={INPUT_CLASS}
-                  value={form.ccText}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, ccText: e.target.value }))
-                  }
-                  placeholder="optional"
-                  aria-label="Cc recipients"
-                />
-              </EditField>
+              <RecipientInput
+                label="To"
+                value={form.to}
+                onChange={(to) => setForm((f) => ({ ...f, to }))}
+                suggestions={contacts.data ?? []}
+                placeholder="Type a name or address…"
+              />
+              <RecipientInput
+                label="Cc"
+                value={form.cc}
+                onChange={(cc) => setForm((f) => ({ ...f, cc }))}
+                suggestions={contacts.data ?? []}
+                placeholder="optional"
+              />
               <EditField label="Subject">
                 <input
                   className={INPUT_CLASS}
@@ -557,7 +787,7 @@ function DraftPreview({
                 <div className="flex shrink-0 items-center gap-2">
                   <ActionButton
                     variant="quiet"
-                    disabled={save.isPending || send.isPending}
+                    disabled={save.isPending || sending}
                     aria-label="Cancel editing"
                     onClick={() => updateEditing(false)}
                   >
@@ -566,7 +796,7 @@ function DraftPreview({
                   <ActionButton
                     variant={c.sendable ? "quiet" : "primary"}
                     busy={save.isPending}
-                    disabled={send.isPending}
+                    disabled={sending}
                     aria-label={`Save draft to Gmail: ${item.summary}`}
                     onClick={() => save.mutate(formPayload())}
                   >
@@ -575,7 +805,7 @@ function DraftPreview({
                   {c.sendable && (
                     <ActionButton
                       variant="primary"
-                      busy={save.isPending || send.isPending}
+                      busy={save.isPending || sending}
                       aria-label={`Save and send draft: ${item.summary}`}
                       onClick={() => setSaveSendOpen(true)}
                     >
@@ -641,12 +871,18 @@ function DraftPreview({
           } catch {
             return;
           }
-          send.mutate({ path: `/api/drafts/${item.id}/send` });
+          onSend({ follow_up: followUp, follow_up_days: followUpDays });
         }}
       >
-        <MetaLine label="To" value={splitAddresses(form.toText).join(", ")} />
-        <MetaLine label="Cc" value={splitAddresses(form.ccText).join(", ")} />
+        <MetaLine label="To" value={form.to.join(", ")} />
+        <MetaLine label="Cc" value={form.cc.join(", ")} />
         <MetaLine label="Subj" value={form.subject} />
+        <FollowUpFields
+          checked={followUp}
+          days={followUpDays}
+          onCheckedChange={setFollowUp}
+          onDaysChange={setFollowUpDays}
+        />
         <p className="pt-1 text-[12px] leading-snug text-muted">
           Saves your edits to the Gmail draft first, then sends.
         </p>
@@ -655,27 +891,55 @@ function DraftPreview({
   );
 }
 
-export function DraftRow({ item }: { item: DraftItem }) {
-  const [leaving, setLeaving] = useState(false);
+export function DraftRow({ item, ctx }: { item: DraftItem; ctx?: RowCtx }) {
+  const completed = useCompleted();
+  const done = completed.get(`item:${item.id}`);
   const [editing, setEditing] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
-  const action = useRowAction(() => setLeaving(true));
+  const [followUp, setFollowUp] = useState(false);
+  const [followUpDays, setFollowUpDays] = useState(3);
+  const action = useRowAction();
   const queryClient = useQueryClient();
   const content = useDraftContent(item);
   const c = content.data;
+  const send = useRowAction();
 
-  const send = useRowAction(() => {
-    // The row is leaving — drop its cached content along with it.
-    queryClient.removeQueries({ queryKey: ["draft-content", item.id] });
-    setLeaving(true);
-  });
+  const mark = (label: string) =>
+    completed.mark({
+      key: `item:${item.id}`,
+      label,
+      section: ctx?.section,
+      groupKey: ctx?.group.key,
+      groupIndex: ctx?.groupIndex,
+      rowIndex: ctx?.rowIndex,
+      draft: item,
+      group: ctx?.group,
+    });
+
+  const settle = (e: unknown, label: string) => {
+    if (e instanceof ApiError && (e.status === 409 || e.status === 404))
+      mark(label);
+  };
+
+  const fireSend = (body: DraftSendBody) =>
+    send.mutate(
+      { path: `/api/drafts/${item.id}/send`, body },
+      {
+        onSuccess: () => {
+          // The draft is gone from Gmail — drop its cached content.
+          queryClient.removeQueries({ queryKey: ["draft-content", item.id] });
+          mark("Sent");
+        },
+        onError: (e) => settle(e, "Sent"),
+      },
+    );
 
   // Hidden while the edit form is open: the saved draft on Gmail may lag the
   // unsaved edits on screen — "Save & send" in the form covers that path.
-  const showSend = !!c?.sendable && !editing;
+  const showSend = !!c?.sendable && !editing && !done;
 
   return (
-    <Row leaving={leaving}>
+    <Row done={!!done}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge>{item.type_label}</Badge>
         <span className="font-mono text-[11px] text-faint">
@@ -701,39 +965,56 @@ export function DraftRow({ item }: { item: DraftItem }) {
       )}
       {item.flags.length > 0 && <WarnLine>{item.flags.join("; ")}</WarnLine>}
 
-      {item.open_label === "Open draft" && (
-        <DraftPreview item={item} send={send} onEditingChange={setEditing} />
+      {item.open_label === "Open draft" && !done && (
+        <DraftPreview
+          item={item}
+          sending={send.isPending}
+          onSend={fireSend}
+          onEditingChange={setEditing}
+        />
       )}
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <OpenLink
-          href={item.open_url}
-          ariaLabel={`${item.open_label}: ${item.summary} (opens Gmail)`}
-        >
-          {item.open_label}
-          <ExternalLink className="ml-1.5 size-3.5 text-faint" />
-        </OpenLink>
-        <ActionButton
-          variant={showSend ? "quiet" : "primary"}
-          busy={action.isPending}
-          disabled={send.isPending}
-          aria-label={`Mark draft done: ${item.summary}`}
-          onClick={() => action.mutate({ path: `/api/drafts/${item.id}/done` })}
-        >
-          Done
-        </ActionButton>
-        {showSend && (
-          <ActionButton
-            variant="primary"
-            busy={send.isPending}
-            disabled={action.isPending}
-            aria-label={`Send draft: ${item.summary}`}
-            onClick={() => setSendOpen(true)}
+      {done ? (
+        <CompletedMark label={done.label} />
+      ) : (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <OpenLink
+            href={item.open_url}
+            ariaLabel={`${item.open_label}: ${item.summary} (opens Gmail)`}
           >
-            Send
+            {item.open_label}
+            <ExternalLink className="ml-1.5 size-3.5 text-faint" />
+          </OpenLink>
+          <ActionButton
+            variant={showSend ? "quiet" : "primary"}
+            busy={action.isPending}
+            disabled={send.isPending}
+            aria-label={`Mark draft done: ${item.summary}`}
+            onClick={() =>
+              action.mutate(
+                { path: `/api/drafts/${item.id}/done` },
+                {
+                  onSuccess: () => mark("Done"),
+                  onError: (e) => settle(e, "Done"),
+                },
+              )
+            }
+          >
+            Done
           </ActionButton>
-        )}
-      </div>
+          {showSend && (
+            <ActionButton
+              variant="primary"
+              busy={send.isPending}
+              disabled={action.isPending}
+              aria-label={`Send draft: ${item.summary}`}
+              onClick={() => setSendOpen(true)}
+            >
+              Send
+            </ActionButton>
+          )}
+        </div>
+      )}
 
       <ConfirmDialog
         open={sendOpen}
@@ -742,7 +1023,7 @@ export function DraftRow({ item }: { item: DraftItem }) {
         onClose={() => setSendOpen(false)}
         onConfirm={() => {
           setSendOpen(false);
-          send.mutate({ path: `/api/drafts/${item.id}/send` });
+          fireSend({ follow_up: followUp, follow_up_days: followUpDays });
         }}
       >
         {c && (
@@ -752,6 +1033,12 @@ export function DraftRow({ item }: { item: DraftItem }) {
             <MetaLine label="Subj" value={c.subject} />
           </>
         )}
+        <FollowUpFields
+          checked={followUp}
+          days={followUpDays}
+          onCheckedChange={setFollowUp}
+          onDaysChange={setFollowUpDays}
+        />
         <p className="pt-1 text-[12px] leading-snug text-muted">
           Goes out exactly as staged in Gmail.
         </p>
@@ -762,21 +1049,58 @@ export function DraftRow({ item }: { item: DraftItem }) {
 
 /* ── Thread group card (decisions + drafts) ────────────────────────────── */
 
-export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
+export function ThreadGroupCard({
+  group,
+  section,
+  groupIndex,
+  draftsAlsoListed = false,
+}: {
+  group: ThreadGroup;
+  section: Section;
+  groupIndex: number;
+  draftsAlsoListed?: boolean;
+}) {
+  const completed = useCompleted();
   const count = group.decisions.length + group.drafts.length;
-  const noun = group.decisions.length > 0 ? "action" : "draft";
+  const noun =
+    group.decisions.length > 0 && group.drafts.length > 0
+      ? "item"
+      : group.decisions.length > 0
+        ? "action"
+        : "draft";
+  const allDone =
+    count > 0 &&
+    [...group.decisions, ...group.drafts].every((i) =>
+      completed.get(`item:${i.id}`),
+    );
   const [emailOpen, setEmailOpen] = useState(false);
-  // One Read email per card: the thread's most recently received trigger
-  // email (a card can group actions from several messages).
+  // One reading panel per card: the whole thread when we know its Gmail id,
+  // else the most recently received trigger email.
   const source = [...group.decisions, ...group.drafts]
     .filter((i) => i.message_id)
     .sort((a, b) =>
       (b.received_at ?? "").localeCompare(a.received_at ?? ""),
     )[0];
-  const prefetch = useEmailPrefetch(source?.message_id);
+  const prefetchEmail = useEmailPrefetch(source?.message_id);
+  const prefetchThread = useThreadPrefetch(group.thread_id);
+  const hasThread = !!group.thread_id;
+  const prefetch = hasThread ? prefetchThread : prefetchEmail;
+  const canRead = hasThread || !!source?.message_id;
+
+  const ctx = (rowIndex: number): RowCtx => ({
+    section,
+    group,
+    groupIndex,
+    rowIndex,
+  });
 
   return (
-    <section className="rounded-xl border border-hairline bg-surface px-5 pb-1 pt-4 shadow-[0_1px_2px_rgba(20,18,10,0.04)]">
+    <section
+      className={clsx(
+        "rounded-xl border border-hairline bg-surface px-5 pb-1 pt-4 shadow-[0_1px_2px_rgba(20,18,10,0.04)]",
+        allDone && "row-done",
+      )}
+    >
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-hairline pb-3">
         <div className="min-w-0">
           <h3 className="font-display text-lg font-medium leading-tight">
@@ -799,17 +1123,28 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="font-mono text-[11px] text-faint">
-            {count} {count === 1 ? noun : `${noun}s`}
-          </span>
-          {source?.message_id && (
+          {allDone ? (
+            <span className="flex items-center gap-1 font-mono text-[11px] font-medium text-green">
+              <Check className="size-3.5" />
+              All handled
+            </span>
+          ) : (
+            <span className="font-mono text-[11px] text-faint">
+              {count} {count === 1 ? noun : `${noun}s`}
+            </span>
+          )}
+          {canRead && (
             <button
               type="button"
               onClick={() => setEmailOpen((o) => !o)}
               onPointerEnter={prefetch}
               onFocus={prefetch}
               aria-expanded={emailOpen}
-              aria-label={`Read latest email: ${group.subject}`}
+              aria-label={
+                hasThread
+                  ? `View thread: ${group.subject}`
+                  : `Read latest email: ${group.subject}`
+              }
               className="flex cursor-pointer items-center gap-1 text-[13px] font-medium text-green transition-colors hover:text-green-deep"
             >
               <ChevronRight
@@ -818,7 +1153,7 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
                   emailOpen && "rotate-90",
                 )}
               />
-              Read email
+              {hasThread ? "View thread" : "Read email"}
             </button>
           )}
           {group.open_url && (
@@ -834,19 +1169,28 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
           )}
         </div>
       </div>
-      {emailOpen && source?.message_id && (
+      {emailOpen && canRead && (
         <div className="border-b border-hairline py-3">
-          <EmailBodyPanel messageId={source.message_id} />
+          {hasThread ? (
+            <ThreadPanel threadId={group.thread_id} />
+          ) : (
+            <EmailBodyPanel messageId={source!.message_id!} />
+          )}
         </div>
       )}
       <div role="list">
-        {group.decisions.map((d) => (
-          <DecisionRow key={d.id} item={d} />
+        {group.decisions.map((d, i) => (
+          <DecisionRow key={d.id} item={d} ctx={ctx(i)} />
         ))}
-        {group.drafts.map((d) => (
-          <DraftRow key={d.id} item={d} />
+        {group.drafts.map((d, i) => (
+          <DraftRow key={d.id} item={d} ctx={ctx(i)} />
         ))}
       </div>
+      {draftsAlsoListed && group.drafts.length > 0 && (
+        <p className="border-t border-hairline py-2.5 font-mono text-[11px] text-faint">
+          drafts on this thread also appear in Drafts below
+        </p>
+      )}
     </section>
   );
 }
@@ -854,37 +1198,74 @@ export function ThreadGroupCard({ group }: { group: ThreadGroup }) {
 /* ── Follow-ups ────────────────────────────────────────────────────────── */
 
 export function ReminderRow({ item }: { item: ReminderItem }) {
-  const [leaving, setLeaving] = useState(false);
+  const completed = useCompleted();
+  const done = completed.get(`reminder:${item.id}`);
   const [days, setDays] = useState(3);
-  const action = useRowAction(() => setLeaving(true));
+  const action = useRowAction();
+
+  const mark = (label: string) =>
+    completed.mark({ key: `reminder:${item.id}`, label });
+
+  const label = item.subject || item.note;
 
   return (
-    <Row leaving={leaving}>
+    <Row done={!!done}>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
-          <p className="leading-snug">
-            {item.note}
-            {item.project && (
-              <span className="text-muted"> ({item.project})</span>
-            )}
-          </p>
+          {/* The email is the headline; the note says what Peter owes it. */}
+          {item.subject ? (
+            <>
+              <p className="font-medium leading-snug">{item.subject}</p>
+              <p className="mt-0.5 text-[13px] leading-snug text-muted">
+                {item.note}
+              </p>
+            </>
+          ) : (
+            <p className="leading-snug">{item.note}</p>
+          )}
+          {item.sender && (
+            <p className="mt-0.5 text-[13px] text-muted">{item.sender}</p>
+          )}
           <p
             className={clsx(
               "mt-1 font-mono text-xs",
               item.overdue ? "font-medium text-red" : "text-faint",
             )}
           >
+            {item.project && `${item.project} · `}
             due {item.due_at ? item.due_at.slice(0, 10) : "—"}
             {item.overdue && " · overdue"}
           </p>
         </div>
+        {done ? (
+          <span
+            role="status"
+            aria-live="polite"
+            className="flex min-h-11 shrink-0 items-center gap-1.5 text-[13px] font-medium text-green lg:min-h-9"
+          >
+            <Check className="size-4" />
+            {done.label}
+          </span>
+        ) : (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {item.open_url && (
+            <OpenLink
+              href={item.open_url}
+              ariaLabel={`Open thread: ${label} (opens Gmail)`}
+            >
+              Open thread
+              <ExternalLink className="ml-1.5 size-3.5 text-faint" />
+            </OpenLink>
+          )}
           <ActionButton
             variant="primary"
             busy={action.isPending}
-            aria-label={`Mark follow-up done: ${item.note}`}
+            aria-label={`Mark follow-up done: ${label}`}
             onClick={() =>
-              action.mutate({ path: `/api/reminders/${item.id}/done` })
+              action.mutate(
+                { path: `/api/reminders/${item.id}/done` },
+                { onSuccess: () => mark("Done") },
+              )
             }
           >
             Done
@@ -893,7 +1274,7 @@ export function ReminderRow({ item }: { item: ReminderItem }) {
             <select
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              aria-label={`Snooze duration for: ${item.note}`}
+              aria-label={`Snooze duration for: ${label}`}
               className="h-11 rounded-lg border border-hairline-strong bg-surface px-2 text-sm lg:h-9"
             >
               <option value={1}>1 day</option>
@@ -903,18 +1284,22 @@ export function ReminderRow({ item }: { item: ReminderItem }) {
             <ActionButton
               variant="admin"
               busy={action.isPending}
-              aria-label={`Snooze follow-up: ${item.note}`}
+              aria-label={`Snooze follow-up: ${label}`}
               onClick={() =>
-                action.mutate({
-                  path: `/api/reminders/${item.id}/snooze`,
-                  body: { days },
-                })
+                action.mutate(
+                  {
+                    path: `/api/reminders/${item.id}/snooze`,
+                    body: { days },
+                  },
+                  { onSuccess: () => mark("Snoozed") },
+                )
               }
             >
               Snooze
             </ActionButton>
           </span>
         </div>
+        )}
       </div>
     </Row>
   );
@@ -923,11 +1308,15 @@ export function ReminderRow({ item }: { item: ReminderItem }) {
 /* ── FYI ───────────────────────────────────────────────────────────────── */
 
 export function FyiRow({ item }: { item: FyiItem }) {
-  const [leaving, setLeaving] = useState(false);
-  const action = useRowAction(() => setLeaving(true));
+  const completed = useCompleted();
+  const done = completed.get(`fyi:${item.message_id}`);
+  const action = useRowAction();
+
+  const mark = () =>
+    completed.mark({ key: `fyi:${item.message_id}`, label: "Dismissed" });
 
   return (
-    <Row leaving={leaving}>
+    <Row done={!!done}>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <p className="font-medium leading-snug">{item.subject}</p>
@@ -953,29 +1342,43 @@ export function FyiRow({ item }: { item: FyiItem }) {
             label="Read full email"
           />
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <OpenLink
-            href={item.open_url}
-            ariaLabel={`Open FYI email: ${item.subject} (opens Gmail)`}
+        {done ? (
+          <span
+            role="status"
+            aria-live="polite"
+            className="flex min-h-11 shrink-0 items-center gap-1.5 text-[13px] font-medium text-green lg:min-h-9"
           >
-            Open email
-            <ExternalLink className="ml-1.5 size-3.5 text-faint" />
-          </OpenLink>
-          <ActionButton
-            variant="admin"
-            busy={action.isPending}
-            aria-label={`Dismiss FYI: ${item.subject}`}
-            onClick={() =>
-              action.mutate({
-                path: "/api/fyi/dismiss",
-                body: { message_id: item.message_id },
-              })
-            }
-          >
-            <X className="size-3.5" />
-            Dismiss
-          </ActionButton>
-        </div>
+            <Check className="size-4" />
+            {done.label}
+          </span>
+        ) : (
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <OpenLink
+              href={item.open_url}
+              ariaLabel={`Open FYI email: ${item.subject} (opens Gmail)`}
+            >
+              Open email
+              <ExternalLink className="ml-1.5 size-3.5 text-faint" />
+            </OpenLink>
+            <ActionButton
+              variant="admin"
+              busy={action.isPending}
+              aria-label={`Dismiss FYI: ${item.subject}`}
+              onClick={() =>
+                action.mutate(
+                  {
+                    path: "/api/fyi/dismiss",
+                    body: { message_id: item.message_id },
+                  },
+                  { onSuccess: mark },
+                )
+              }
+            >
+              <X className="size-3.5" />
+              Dismiss
+            </ActionButton>
+          </div>
+        )}
       </div>
     </Row>
   );
@@ -984,11 +1387,12 @@ export function FyiRow({ item }: { item: FyiItem }) {
 /* ── Security ──────────────────────────────────────────────────────────── */
 
 export function SecurityRow({ item }: { item: SecurityItem }) {
-  const [leaving, setLeaving] = useState(false);
-  const action = useRowAction(() => setLeaving(true));
+  const completed = useCompleted();
+  const done = completed.get(`security:${item.message_id}`);
+  const action = useRowAction();
 
   return (
-    <Row leaving={leaving}>
+    <Row done={!!done}>
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <p className="font-medium leading-snug">
@@ -1004,19 +1408,39 @@ export function SecurityRow({ item }: { item: SecurityItem }) {
             number to verify.
           </p>
         </div>
-        <ActionButton
-          variant="admin"
-          busy={action.isPending}
-          aria-label={`Dismiss security alert: ${item.subject}`}
-          onClick={() =>
-            action.mutate({
-              path: "/api/security/dismiss",
-              body: { message_id: item.message_id },
-            })
-          }
-        >
-          Dismiss
-        </ActionButton>
+        {done ? (
+          <span
+            role="status"
+            aria-live="polite"
+            className="flex min-h-11 shrink-0 items-center gap-1.5 text-[13px] font-medium text-green lg:min-h-9"
+          >
+            <Check className="size-4" />
+            {done.label}
+          </span>
+        ) : (
+          <ActionButton
+            variant="admin"
+            busy={action.isPending}
+            aria-label={`Dismiss security alert: ${item.subject}`}
+            onClick={() =>
+              action.mutate(
+                {
+                  path: "/api/security/dismiss",
+                  body: { message_id: item.message_id },
+                },
+                {
+                  onSuccess: () =>
+                    completed.mark({
+                      key: `security:${item.message_id}`,
+                      label: "Dismissed",
+                    }),
+                },
+              )
+            }
+          >
+            Dismiss
+          </ActionButton>
+        )}
       </div>
     </Row>
   );
